@@ -17,6 +17,7 @@
 - [快速開始](#快速開始)
 - [執行測試](#執行測試)
 - [技術棧](#技術棧)
+- [延伸閱讀](#延伸閱讀)
 
 ---
 
@@ -46,20 +47,33 @@
 
 DDD 不再按技術層級（Controller、Service、Repository）組織程式碼，而是按 **業務能力** 來劃分：
 
-```
- 傳統架構                       DDD 架構
- ========================          ================
- controllers/                      order-context/
-   OrderController.java              order-domain/        ← 純業務規則
-   ProductionController.java         order-application/   ← 使用案例
-   InspectionController.java         order-infrastructure/← REST、JPA 等
- services/                         manufacturing-context/
-   OrderService.java                 manufacturing-domain/
-   ProductionService.java            manufacturing-application/
-   InspectionService.java            manufacturing-infrastructure/
- repositories/                     vehicle-config-context/
-   OrderRepository.java              ...
-   ProductionRepository.java
+```mermaid
+graph LR
+    subgraph Traditional["傳統架構 ❌"]
+        direction TB
+        TC["controllers/"]
+        TS["services/"]
+        TR["repositories/"]
+    end
+
+    subgraph DDD["DDD 架構 ✅"]
+        direction TB
+        subgraph OC["order-context/"]
+            OD["order-domain/ ← 純業務規則"]
+            OA["order-application/ ← 使用案例"]
+            OI["order-infrastructure/ ← REST、JPA"]
+        end
+        subgraph MC["manufacturing-context/"]
+            MD["manufacturing-domain/"]
+            MA["manufacturing-application/"]
+            MI["manufacturing-infrastructure/"]
+        end
+    end
+
+    Traditional -.->|"重構"| DDD
+
+    style Traditional fill:#fecaca,stroke:#ef4444
+    style DDD fill:#bbf7d0,stroke:#22c55e
 ```
 
 結果？**每個限界上下文（Bounded Context）** 都可以獨立演進。訂單團隊不需要了解組裝產線的排程。品管團隊不需要知道經銷商定價。而領域邏輯——你軟體中最有價值的部分——保持 **純淨、可測試、不依賴任何框架**。
@@ -100,6 +114,7 @@ DDD 不再按技術層級（Controller、Service、Repository）組織程式碼�
 | **轉接器（Adapter）** | 使用特定技術實作連接埠 | `JpaOrderRepositoryAdapter` 使用 Spring Data JPA 實作 `OrderRepository` |
 | **防腐層（Anti-Corruption Layer, ACL）** | 防止一個上下文的模型滲透到另一個上下文的轉譯層 | `VehicleConfigACLAdapter` — 訂單上下文查詢車輛配置資料，但不 import 車輛配置的領域類別 |
 | **交易發件箱（Transactional Outbox）** | 可靠的事件發布模式：將事件寫入資料庫表，再轉發出去 | `DomainEventOutbox` 表 — 事件與聚合在同一筆交易中儲存 |
+| **CQRS（命令查詢分離）** | 將寫入（Command）與讀取（Query）在應用層分離，各自獨立演化 | `PlaceOrderUseCase` 是 Command；`GetOrderUseCase` 是 Query；ArchUnit 強制規則 |
 
 ---
 
@@ -238,7 +253,53 @@ public class AssemblyStep {
 }
 ```
 
-### 7. 四眼原則（聚合中的領域規則）
+### 7. CQRS（命令查詢職責分離）
+
+應用層將寫入操作（Command）與讀取操作（Query）明確分離，由 shared-kernel 中的標記介面強制約束：
+
+```java
+// 命令 — 會改變狀態，可能發布領域事件
+public interface PlaceOrderUseCase extends CommandUseCase {
+    PlaceOrderResult execute(PlaceOrderCommand command);
+}
+
+// 查詢 — 純讀取，無副作用
+public interface GetOrderUseCase extends QueryUseCase {
+    OrderDetail execute(GetOrderQuery query);
+}
+```
+
+**兩種查詢策略（教學用）：**
+
+| 上下文 | 策略 | 說明 |
+|--------|------|------|
+| Order | 透過 Domain Repository | 查詢走 `OrderRepository`，映射領域模型為 DTO（簡單同模型） |
+| Manufacturing | 透過專用 QueryPort | 查詢走 `ProductionOrderQueryPort`，JPA 直接映射為 DTO（獨立讀取模型） |
+
+```mermaid
+graph LR
+    subgraph Command["寫入路徑 (Command)"]
+        CC["Controller POST"] --> CU["CommandUseCase"]
+        CU --> AG["Aggregate Root"]
+        AG --> RE["Repository.save()"]
+        AG -.->|"registerEvent()"| EV["DomainEvent"]
+    end
+
+    subgraph Query["讀取路徑 (Query)"]
+        QC["Controller GET"] --> QU["QueryUseCase"]
+        QU --> QP["QueryPort / Repository"]
+        QP --> DTO["ReadModel DTO"]
+    end
+
+    style Command fill:#fff3cd
+    style Query fill:#d4edda
+```
+
+**ArchUnit 強制規則：**
+- 查詢用例不可注入 `DomainEventPublisher`（查詢無副作用）
+- 一個用例只能是 Command 或 Query，不可同時實作兩者
+
+### 8. 四眼原則（聚合中的領域規則）
 
 品質檢驗要求覆核人必須與檢驗員不同——這條業務規則存在於領域中，而不是 Controller：
 
@@ -259,11 +320,21 @@ public class QualityInspection extends AggregateRoot {
 
 本專案模擬一條 **端到端的車輛製造流水線**：
 
-```
-經銷商下訂單 ──→ 建立生產工單 ──→ 組裝產線 ──→ 品質檢驗 ──→ 車輛完成
-   (US-01)         (US-02)        (US-03)      (US-04)
-                                                  ↓（若不合格）
-                                               返工 ──→ 重新檢驗
+```mermaid
+graph LR
+    A["經銷商下訂單<br/>(US-01)"] --> B["建立生產工單<br/>(US-02)"]
+    B --> C["組裝產線<br/>(US-03)"]
+    C --> D["品質檢驗<br/>(US-04)"]
+    D -->|合格| E["車輛完成"]
+    D -->|不合格| F["返工"]
+    F --> D
+
+    style A fill:#dbeafe,stroke:#3b82f6
+    style B fill:#fef3c7,stroke:#f59e0b
+    style C fill:#fef3c7,stroke:#f59e0b
+    style D fill:#d1fae5,stroke:#10b981
+    style E fill:#bbf7d0,stroke:#22c55e
+    style F fill:#fecaca,stroke:#ef4444
 ```
 
 ### 使用者故事
@@ -282,307 +353,314 @@ public class QualityInspection extends AggregateRoot {
 
 ### 限界上下文總覽
 
-```
-┌─────────────────────────────────────────────────────────┐
-│                     啟動模組（Bootstrap）                  │
-│         Spring Boot App / Flyway / Docker Compose         │
-└────────────────────────┬────────────────────────────────┘
-                         │ 依賴所有基礎設施模組
-    ┌────────────────────┼────────────────────┐
-    │                    │                    │
-    ▼                    ▼                    ▼
-┌─────────┐      ┌──────────────┐     ┌──────────────┐
-│  訂單    │      │   製造       │     │  車輛配置     │
-│  上下文  │      │   上下文     │     │   上下文      │
-└────┬─────┘      └──────┬───────┘     └──────┬───────┘
-     │                   │                    │
-     ▼                   ▼                    ▼
+```mermaid
+graph TB
+    Bootstrap["啟動模組（Bootstrap）<br/>Spring Boot App / Flyway / Docker Compose"]
 
-每個上下文有 3 個層次：
+    Bootstrap --> OrderInfra["訂單上下文"]
+    Bootstrap --> MfgInfra["製造上下文"]
+    Bootstrap --> VcInfra["車輛配置上下文"]
 
-┌─────────────────────────────────────┐
-│          基礎設施層                   │  ← REST Controller、JPA 實體、
-│  (Spring Boot, JPA, REST 轉接器)     │     事件消費者、ACL 轉接器
-├─────────────────────────────────────┤
-│           應用層                      │  ← 使用案例（PlaceOrderUseCase、
-│    (使用案例，不依賴框架)              │     CreateProductionOrderUseCase）
-├─────────────────────────────────────┤
-│           領域層                      │  ← 聚合、實體、值物件、
-│  (純 Java — 零框架依賴)              │     領域事件、領域服務、連接埠
-└─────────────────────────────────────┘
+    subgraph legend["每個上下文有 3 個層次"]
+        Infra["基礎設施層<br/>REST Controller、JPA、ACL 轉接器"]
+        App["應用層<br/>Command / Query Use Cases（CQRS）"]
+        Domain["領域層<br/>聚合、實體、值物件、領域事件、連接埠<br/>⚠️ 純 Java — 零框架依賴"]
+        Infra --> App --> Domain
+    end
+
+    style Bootstrap fill:#4a90d9,color:#fff
+    style OrderInfra fill:#f5a623,color:#fff
+    style MfgInfra fill:#f5a623,color:#fff
+    style VcInfra fill:#f5a623,color:#fff
+    style Infra fill:#e8e8e8
+    style App fill:#d4edda
+    style Domain fill:#fff3cd
 ```
 
-**ArchUnit 測試** 自動確保領域層和應用層沒有 Spring/JPA 的 import。
+**ArchUnit 測試** 自動確保領域層和應用層沒有 Spring/JPA 的 import，以及 CQRS 規則（查詢不可發布事件、命令與查詢不可混用）。
 
 ### 上下文映射圖（Context Map）
 
 展示四個限界上下文之間的關係，包括事件流、防腐層和 Mock 轉接器：
 
-```
-┌──────────────────────────────────────────────────────────────────────────────┐
-│                             上下文映射圖                                      │
-│                                                                              │
-│  ┌─────────────────────┐       領域事件          ┌──────────────────────┐    │
-│  │                     │   OrderPlacedEvent       │                      │    │
-│  │   訂單上下文         │ ─────────────────────→  │   製造上下文          │    │
-│  │   (Order Context)   │   OrderChangedEvent      │   (Manufacturing     │    │
-│  │                     │ ─────────────────────→  │    Context)           │    │
-│  │  聚合: Order        │                          │                      │    │
-│  │  Port: OrderRepo    │                          │  聚合: ProductionOrder│    │
-│  │  Port: VehicleConfig│                          │  聚合: QualityInspect│    │
-│  │        Gateway      │                          │  聚合: ReworkOrder   │    │
-│  └──────────┬──────────┘                          │  Port: ProductionRepo│    │
-│             │                                     │  Port: MaterialGW   │    │
-│             │ ACL（防腐層）                         └──────────┬───────────┘    │
-│             │ 原生 SQL 查詢                                   │               │
-│             ▼                                                 │ Mock 轉接器    │
-│  ┌─────────────────────┐                                     ▼               │
-│  │                     │                          ┌──────────────────────┐    │
-│  │  車輛配置上下文      │                          │                      │    │
-│  │  (Vehicle Config    │                          │   物料上下文          │    │
-│  │   Context)          │                          │   (Material Context) │    │
-│  │                     │                          │                      │    │
-│  │  聚合: VehiclConfig │                          │  MockMaterialAdapter │    │
-│  │  實體: OptionPackage│                          │  → 永遠回傳「有庫存」  │    │
-│  │  規則: Compatibility│                          │                      │    │
-│  └─────────────────────┘                          └──────────────────────┘    │
-│                                                                              │
-│  關係類型:                                                                    │
-│  ─────→  領域事件（非同步、鬆耦合）                                             │
-│  ─ACL─→ 防腐層（同步查詢，隔離模型）                                            │
-│  ─Mock→ Mock 轉接器（PoC 簡化）                                               │
-└──────────────────────────────────────────────────────────────────────────────┘
+```mermaid
+graph LR
+    subgraph Order["訂單上下文 (Order Context)"]
+        O_Agg["聚合: Order"]
+        O_Port["Port: OrderRepository<br/>Port: VehicleConfigGateway"]
+    end
+
+    subgraph Mfg["製造上下文 (Manufacturing Context)"]
+        M_Agg["聚合: ProductionOrder<br/>聚合: QualityInspection<br/>聚合: ReworkOrder"]
+        M_Port["Port: ProductionOrderRepo<br/>Port: MaterialGateway"]
+    end
+
+    subgraph VC["車輛配置上下文 (Vehicle Config)"]
+        VC_Agg["聚合: VehicleConfiguration<br/>實體: OptionPackage<br/>規則: Compatibility"]
+    end
+
+    subgraph Mat["物料上下文 (Material Context)"]
+        Mat_Mock["MockMaterialAdapter<br/>→ 永遠回傳「有庫存」"]
+    end
+
+    Order -- "OrderPlacedEvent<br/>OrderChangedEvent<br/>📨 領域事件" --> Mfg
+    Order -- "ACL（防腐層）<br/>原生 SQL 查詢" --> VC
+    Mfg -- "Mock 轉接器" --> Mat
+
+    style Order fill:#dbeafe,stroke:#3b82f6
+    style Mfg fill:#fef3c7,stroke:#f59e0b
+    style VC fill:#d1fae5,stroke:#10b981
+    style Mat fill:#f3e8ff,stroke:#8b5cf6
 ```
 
 ### 六角架構詳細圖（以訂單上下文為例）
 
-```
-                          ┌─────────────────┐
-                          │   REST Client   │
-                          │  (Dealer App)   │
-                          └────────┬────────┘
-                                   │ HTTP
-                    ┌──────────────▼──────────────┐
-                    │      OrderController         │ ◄── 入站轉接器（Inbound Adapter）
-                    │    (REST API Adapter)         │
-                    └──────────────┬───────────────┘
-                                   │
-              ╔════════════════════▼════════════════════╗
-              ║          應用層（Application）            ║
-              ║  ┌──────────────────────────────────┐  ║
-              ║  │      PlaceOrderUseCase            │  ║ ◄── 入站連接埠（Inbound Port）
-              ║  │      ChangeOrderUseCase           │  ║
-              ║  └──────────────┬───────────────────┘  ║
-              ╚════════════════│════════════════════════╝
-                               │
-              ╔════════════════▼════════════════════════╗
-              ║           領域層（Domain）               ║
-              ║                                        ║
-              ║  ┌────────────────────────────────┐    ║
-              ║  │         Order（聚合根）          │    ║
-              ║  │  ┌──────────┐ ┌─────────────┐  │    ║
-              ║  │  │ OrderId  │ │ OrderNumber  │  │    ║
-              ║  │  │ (值物件) │ │  (值物件)    │  │    ║
-              ║  │  └──────────┘ └─────────────┘  │    ║
-              ║  └────────────────────────────────┘    ║
-              ║                                        ║
-              ║  ┌──────────────┐ ┌────────────────┐   ║
-              ║  │OrderRepository│ │VehicleConfig   │   ║ ◄── 出站連接埠（Outbound Port）
-              ║  │  (Port)      │ │ Gateway (Port) │   ║
-              ║  └──────┬───────┘ └───────┬────────┘   ║
-              ╚═════════│═════════════════│════════════╝
-                        │                 │
-              ┌─────────▼──────┐ ┌────────▼──────────┐
-              │ JpaOrderRepo   │ │ VehicleConfigACL   │ ◄── 出站轉接器（Outbound Adapter）
-              │   Adapter      │ │    Adapter         │
-              │ (Spring Data)  │ │ (Native SQL)       │
-              └─────────┬──────┘ └────────┬───────────┘
-                        │                 │
-                        ▼                 ▼
-                   ┌─────────┐    ┌──────────────┐
-                   │   訂單   │    │   車輛配置    │
-                   │   資料表  │    │   資料表      │
-                   │ (orders) │    │ (vehicle_    │
-                   │          │    │  configs)    │
-                   └─────────┘    └──────────────┘
+```mermaid
+graph TB
+    Client["REST Client<br/>(Dealer App)"]
+    Client -->|HTTP| Controller
+
+    subgraph Infra_In["入站轉接器 (Inbound Adapter)"]
+        Controller["OrderController<br/>(REST API Adapter)"]
+    end
+
+    subgraph App["應用層 (Application) — CQRS"]
+        Commands["Command: PlaceOrderUseCase<br/>Command: ChangeOrderUseCase"]
+        Queries["Query: GetOrderUseCase<br/>Query: ListOrdersUseCase"]
+    end
+
+    Controller --> Commands
+    Controller --> Queries
+
+    subgraph Domain["領域層 (Domain) — 純 Java"]
+        Aggregate["Order（聚合根）<br/>├── OrderId (值物件)<br/>└── OrderNumber (值物件)"]
+        Ports["OrderRepository (Port)<br/>VehicleConfigGateway (Port)"]
+    end
+
+    Commands --> Aggregate
+    Queries --> Ports
+    Aggregate --> Ports
+
+    subgraph Infra_Out["出站轉接器 (Outbound Adapter)"]
+        JpaAdapter["JpaOrderRepoAdapter<br/>(Spring Data)"]
+        AclAdapter["VehicleConfigACL<br/>(Native SQL)"]
+    end
+
+    Ports --> JpaAdapter
+    Ports --> AclAdapter
+
+    JpaAdapter --> DB_Orders[("orders 資料表")]
+    AclAdapter --> DB_VC[("vehicle_configs 資料表")]
+
+    style Client fill:#6366f1,color:#fff
+    style Infra_In fill:#e8e8e8
+    style App fill:#d4edda
+    style Domain fill:#fff3cd
+    style Infra_Out fill:#e8e8e8
+    style DB_Orders fill:#f0f0f0
+    style DB_VC fill:#f0f0f0
 ```
 
 ### 聚合邊界圖
 
 展示每個聚合包含的實體和值物件，以及一致性邊界：
 
-```
-┌─ Order 聚合 ─────────────────────────────────────────────────────┐
-│                                                                   │
-│  Order（聚合根）                                                   │
-│  ├── OrderId (值物件)                                             │
-│  ├── OrderNumber (值物件)                                         │
-│  ├── OrderStatus (列舉)          ← PENDING → CONFIRMED → CANCELLED│
-│  ├── dealerId: String                                             │
-│  ├── modelCode, colorCode: String                                 │
-│  ├── optionCodes: List<String>                                    │
-│  ├── totalPrice: BigDecimal                                       │
-│  ├── estimatedDeliveryDate: LocalDate                             │
-│  └── changeCount: int            ← 最多 3 次（BR-15）              │
-│                                                                   │
-│  領域事件: OrderPlacedEvent, OrderChangedEvent, OrderCancelledEvent│
-└───────────────────────────────────────────────────────────────────┘
+```mermaid
+classDiagram
+    class Order {
+        <<Aggregate Root>>
+        OrderId id
+        OrderNumber orderNumber
+        OrderStatus status
+        String dealerId
+        String modelCode, colorCode
+        List~String~ optionCodes
+        BigDecimal totalPrice
+        LocalDate estimatedDeliveryDate
+        int changeCount ≤ 3 (BR-15)
+        +place() Order
+        +changeConfiguration()
+        +cancel()
+    }
 
-┌─ ProductionOrder 聚合 ───────────────────────────────────────────┐
-│                                                                   │
-│  ProductionOrder（聚合根）                                         │
-│  ├── ProductionOrderId (值物件)                                   │
-│  ├── ProductionOrderNumber (值物件)                               │
-│  ├── VIN (值物件)                ← 17 碼車身號碼                    │
-│  ├── ProductionStatus (列舉)     ← SCHEDULED → IN_PROGRESS →     │
-│  │                                  ASSEMBLED → COMPLETED         │
-│  ├── BomSnapshot (值物件)        ← 物料清單快照                     │
-│  │   └── BomLineItem[] (值物件)  ← 零件編號 + 數量 + 可用狀態      │
-│  │                                                                │
-│  └── AssemblyProcess（實體）                                       │
-│      ├── AssemblyProcessId (值物件)                               │
-│      ├── station: 1..5           ← 5 個工站                       │
-│      └── AssemblyStep[]（實體）                                    │
-│          ├── AssemblyStepId (值物件)                               │
-│          ├── StationNumber (值物件)                                │
-│          ├── MaterialBatchId (值物件)  ← 批號追溯（BR-08）          │
-│          ├── operatorId: String                                   │
-│          ├── standardMinutes / actualMinutes                      │
-│          └── AssemblyStepStatus (列舉)  ← PENDING → COMPLETED    │
-│                                                                   │
-│  領域事件: ProductionOrderScheduledEvent, AssemblyCompletedEvent   │
-└───────────────────────────────────────────────────────────────────┘
+    class OrderStatus {
+        <<Enumeration>>
+        PENDING
+        CONFIRMED
+        CANCELLED
+    }
 
-┌─ QualityInspection 聚合 ─────────────────────────────────────────┐
-│                                                                   │
-│  QualityInspection（聚合根）                                       │
-│  ├── InspectionId (值物件)                                        │
-│  ├── inspectorId: String                                          │
-│  ├── reviewerId: String          ← 必須 ≠ inspectorId（BR-12）    │
-│  ├── InspectionStatus (列舉)     ← IN_PROGRESS → PASSED/FAILED/  │
-│  │                                  CONDITIONAL_PASS → REVIEWED   │
-│  └── InspectionItem[]（實體）                                      │
-│      ├── InspectionItemId (值物件)                                │
-│      ├── isSafetyCritical: boolean  ← 安全關鍵項（BR-10）          │
-│      ├── InspectionResult (列舉)    ← PASS / FAIL / CONDITIONAL  │
-│      └── notes: String                                            │
-│                                                                   │
-│  領域事件: InspectionPassedEvent, InspectionFailedEvent            │
-└───────────────────────────────────────────────────────────────────┘
+    Order --> OrderStatus
+    Order ..> OrderPlacedEvent : publishes
+    Order ..> OrderChangedEvent : publishes
+    Order ..> OrderCancelledEvent : publishes
 
-┌─ ReworkOrder 聚合 ───────────────────────────────────────────────┐
-│                                                                   │
-│  ReworkOrder（聚合根）                                             │
-│  ├── ReworkOrderId (值物件)                                       │
-│  ├── sourceInspectionId: UUID                                     │
-│  ├── ReworkStatus (列舉)         ← PENDING → COMPLETED            │
-│  └── failedItems: List<String>   ← 不合格項目清單                  │
-│                                                                   │
-│  領域事件: ReworkCompletedEvent                                    │
-└───────────────────────────────────────────────────────────────────┘
+    class ProductionOrder {
+        <<Aggregate Root>>
+        ProductionOrderId id
+        ProductionOrderNumber number
+        VIN vin (17碼)
+        ProductionStatus status
+        BomSnapshot bom
+        +create() ProductionOrder
+        +startProduction()
+        +completeAssemblyStep()
+    }
+
+    class AssemblyProcess {
+        <<Entity>>
+        AssemblyProcessId id
+        +completeStep()
+    }
+
+    class AssemblyStep {
+        <<Entity>>
+        AssemblyStepId id
+        StationNumber station (1..5)
+        MaterialBatchId batchId (BR-08)
+        String operatorId
+        int standardMinutes
+        int actualMinutes
+        AssemblyStepStatus status
+        +complete()
+    }
+
+    ProductionOrder *-- AssemblyProcess : owns
+    AssemblyProcess *-- AssemblyStep : owns 1..*
+    ProductionOrder ..> ProductionOrderScheduledEvent : publishes
+    ProductionOrder ..> AssemblyCompletedEvent : publishes
+
+    class QualityInspection {
+        <<Aggregate Root>>
+        InspectionId id
+        String inspectorId
+        String reviewerId ≠ inspectorId (BR-12)
+        InspectionStatus status
+        +create() QualityInspection
+        +recordItemResult()
+        +complete()
+        +review()
+    }
+
+    class InspectionItem {
+        <<Entity>>
+        InspectionItemId id
+        boolean isSafetyCritical (BR-10)
+        InspectionResult result
+        String notes
+    }
+
+    QualityInspection *-- InspectionItem : owns 1..*
+    QualityInspection ..> InspectionPassedEvent : publishes
+    QualityInspection ..> InspectionFailedEvent : publishes
+
+    class ReworkOrder {
+        <<Aggregate Root>>
+        ReworkOrderId id
+        UUID sourceInspectionId
+        ReworkStatus status
+        List~String~ failedItems
+        +complete()
+    }
+
+    ReworkOrder ..> ReworkCompletedEvent : publishes
 ```
 
 ### 事件驅動流程圖
 
 展示從下單到交車的完整事件流：
 
-```
- 經銷商                訂單上下文              製造上下文               品質上下文
-   │                      │                      │                      │
-   │  POST /orders        │                      │                      │
-   │─────────────────────→│                      │                      │
-   │                      │                      │                      │
-   │                      │ Order.place()        │                      │
-   │                      │ ✓ 驗證配置（ACL）     │                      │
-   │                      │ ✓ 計算價格（ACL）     │                      │
-   │                      │ ✓ 計算交車日          │                      │
-   │                      │                      │                      │
-   │                      │──OrderPlacedEvent───→│                      │
-   │                      │                      │                      │
-   │                      │                      │ ProductionOrder      │
-   │                      │                      │  .create()           │
-   │                      │                      │ ✓ 指派 VIN           │
-   │                      │                      │ ✓ 展開 BOM           │
-   │                      │                      │ ✓ 檢查物料           │
-   │                      │                      │                      │
-   │                      │                      │ [操作員掃描開始生產]   │
-   │                      │                      │                      │
-   │                      │                      │ completeAssemblyStep │
-   │                      │                      │  (工站 1 → 2 → ... → 5)│
-   │                      │                      │ ✓ 依序完成（BR-07）   │
-   │                      │                      │ ✓ 記錄批號（BR-08）   │
-   │                      │                      │                      │
-   │                      │                      │──AssemblyCompleted──→│
-   │                      │                      │                      │
-   │                      │                      │                      │ QualityInspection
-   │                      │                      │                      │  .create()
-   │                      │                      │                      │ ✓ 建立檢驗項目
-   │                      │                      │                      │
-   │                      │                      │                      │ recordResult()
-   │                      │                      │                      │  × N 個項目
-   │                      │                      │                      │
-   │                      │                      │                      │ complete()
-   │                      │                      │                      │ ✓ 安全項目判定
-   │                      │                      │                      │
-   │                      │                      │           ┌──────────┤
-   │                      │                      │           │ 合格?    │
-   │                      │                      │           ├── 是 ───→│ review()
-   │                      │                      │           │          │ ✓ 四眼原則
-   │                      │                      │           │          │
-   │                      │                      │←─Passed──│──────────│
-   │                      │                      │  Event    │          │
-   │                      │                      │           │          │
-   │                      │                      │           ├── 否 ───→│ 建立 ReworkOrder
-   │                      │                      │           │          │
-   │                      │                      │           │          │ [返工完成後]
-   │                      │                      │           │          │ → 重新檢驗
-   │                      │                      │           └──────────┤
-   │                      │                      │                      │
-   │                      │                      │ 標記為 COMPLETED     │
-   │  ← 車輛完成通知 ─────│──────────────────────│                      │
-   │                      │                      │                      │
+```mermaid
+sequenceDiagram
+    participant D as 經銷商
+    participant O as 訂單上下文
+    participant M as 製造上下文
+    participant Q as 品質上下文
+
+    D->>O: POST /orders
+    activate O
+    Note over O: Order.place()<br/>✓ 驗證配置（ACL）<br/>✓ 計算價格（ACL）<br/>✓ 計算交車日
+    O-->>M: OrderPlacedEvent
+    deactivate O
+
+    activate M
+    Note over M: ProductionOrder.create()<br/>✓ 指派 VIN<br/>✓ 展開 BOM<br/>✓ 檢查物料
+
+    Note over M: [操作員掃描開始生產]
+    Note over M: completeAssemblyStep()<br/>工站 1 → 2 → ... → 5<br/>✓ 依序完成（BR-07）<br/>✓ 記錄批號（BR-08）
+
+    M-->>Q: AssemblyCompletedEvent
+    deactivate M
+
+    activate Q
+    Note over Q: QualityInspection.create()<br/>✓ 建立檢驗項目
+
+    Note over Q: recordResult() × N 個項目
+
+    Note over Q: complete()<br/>✓ 安全項目判定（BR-10）
+
+    alt 合格
+        Note over Q: review()<br/>✓ 四眼原則（BR-12）
+        Q-->>M: InspectionPassedEvent
+        Note over M: 標記為 COMPLETED
+    else 不合格
+        Note over Q: 建立 ReworkOrder
+        Note over Q: [返工完成後]<br/>→ 重新檢驗
+        Q-->>M: InspectionFailedEvent
+    end
+    deactivate Q
+
+    M-->>D: 車輛完成通知
 ```
 
 ### Maven 模組依賴圖
 
-```
-                              bootstrap
-                            (Spring Boot App)
-                           ╱      │        ╲
-                          ╱       │         ╲
-                         ▼        ▼          ▼
-              order-           mfg-          vehicle-config-
-            infrastructure   infrastructure   infrastructure
-                 │               │                │
-                 ▼               ▼                ▼
-              order-           mfg-          vehicle-config-
-            application      application      application
-                 │               │                │
-                 ▼               ▼                ▼
-              order-           mfg-          vehicle-config-
-              domain          domain            domain
-                 ╲               │              ╱
-                  ╲              │             ╱
-                   ╲             ▼            ╱
-                    ╲──→  shared-kernel  ←──╱
-                         (AggregateRoot,
-                          DomainEvent,
-                          DomainEventPublisher)
+```mermaid
+graph TB
+    Bootstrap["bootstrap<br/>(Spring Boot App)"]
 
-      額外依賴:
-      ─────────
-      bootstrap ──→ material-mock
-      order-infrastructure ──→ vehicle-config-infrastructure（無！使用 ACL）
-      mfg-infrastructure ──→ material-mock
+    Bootstrap --> OI["order-infrastructure"]
+    Bootstrap --> MI["mfg-infrastructure"]
+    Bootstrap --> VI["vehicle-config-infrastructure"]
+    Bootstrap --> MM["material-mock"]
 
-      依賴規則:
-      ─────────
-      ✓ domain 只能依賴 shared-kernel（純 Java）
-      ✓ application 只能依賴 domain
-      ✓ infrastructure 可以依賴 application + 框架
-      ✗ domain 絕不能依賴 application 或 infrastructure
-      ✗ application 絕不能依賴 infrastructure
+    OI --> OA["order-application"]
+    MI --> MA["mfg-application"]
+    VI --> VA["vehicle-config-application"]
+
+    MI --> MM
+
+    OA --> OD["order-domain"]
+    MA --> MD["mfg-domain"]
+    VA --> VD["vehicle-config-domain"]
+
+    OA --> SK["shared-kernel<br/>(AggregateRoot, DomainEvent,<br/>DomainEventPublisher,<br/>CommandUseCase, QueryUseCase)"]
+    MA --> SK
+    OD --> SK
+    MD --> SK
+    VD --> SK
+
+    style Bootstrap fill:#4a90d9,color:#fff
+    style SK fill:#f5a623,color:#fff
+    style MM fill:#f3e8ff,stroke:#8b5cf6
+    style OI fill:#e8e8e8
+    style MI fill:#e8e8e8
+    style VI fill:#e8e8e8
+    style OA fill:#d4edda
+    style MA fill:#d4edda
+    style VA fill:#d4edda
+    style OD fill:#fff3cd
+    style MD fill:#fff3cd
+    style VD fill:#fff3cd
 ```
+
+> **依賴規則:**
+> - ✅ domain 只能依賴 shared-kernel（純 Java）
+> - ✅ application 只能依賴 domain + shared-kernel
+> - ✅ infrastructure 可以依賴 application + 框架
+> - ❌ domain 絕不能依賴 application 或 infrastructure
+> - ❌ application 絕不能依賴 infrastructure
+> - ❌ order-infrastructure **不**依賴 vehicle-config-infrastructure（使用 ACL）
 
 ---
 
@@ -600,6 +678,11 @@ auto-mfg/
 │           │   ├── AggregateRoot.java       # 基底類別，含領域事件
 │           │   ├── DomainEvent.java         # 基底事件，含 ID + 時間戳
 │           │   └── DomainEventPublisher.java# 連接埠介面
+│           ├── application/
+│           │   ├── UseCase.java               # 基底標記介面
+│           │   ├── CommandUseCase.java         # 命令標記（寫入）
+│           │   ├── QueryUseCase.java           # 查詢標記（讀取）
+│           │   └── ReadModel.java             # 查詢 DTO 標記
 │           └── infrastructure/
 │               ├── ProcessedEvent.java      # 冪等事件追蹤
 │               ├── DomainEventOutbox.java   # 交易發件箱
@@ -610,8 +693,9 @@ auto-mfg/
 │   │   ├── model/   Order, OrderId, OrderNumber, OrderStatus
 │   │   ├── event/   OrderPlacedEvent, OrderChangedEvent
 │   │   └── port/    OrderRepository, VehicleConfigGateway
-│   ├── order-application/               # 使用案例
-│   │   └── usecase/ PlaceOrderUseCase, ChangeOrderUseCase
+│   ├── order-application/               # 使用案例（CQRS）
+│   │   └── usecase/ PlaceOrderUseCase, ChangeOrderUseCase（Command）
+│   │              GetOrderUseCase, ListOrdersUseCase（Query）
 │   └── order-infrastructure/            # Spring/JPA 轉接器
 │       ├── persistence/  JPA 實體、映射器、儲存庫轉接器
 │       └── adapter/      OrderController (REST), VehicleConfigACL
@@ -624,8 +708,11 @@ auto-mfg/
 │   │   ├── event/   14 個領域事件（排程、開始、完成等）
 │   │   ├── service/ BomExpansionService, InspectionCompletionService
 │   │   └── port/    5 個儲存庫／閘道介面
-│   ├── manufacturing-application/       # 使用案例
-│   │   └── usecase/ 建立／開始／完成 生產、檢驗、返工
+│   ├── manufacturing-application/       # 使用案例（CQRS）
+│   │   ├── usecase/ 建立／開始／完成 生產、檢驗、返工（Command）
+│   │   │            GetProductionOrder, ListProductionOrders,
+│   │   │            GetAssemblySteps, GetInspection（Query）
+│   │   └── port/    ProductionOrderQueryPort, InspectionQueryPort
 │   └── manufacturing-infrastructure/    # Spring/JPA 轉接器
 │       ├── persistence/  所有聚合的 JPA 實體與映射器
 │       └── adapter/      ProductionOrderController, InspectionController,
@@ -647,7 +734,7 @@ auto-mfg/
     │       ├── V1__init_schema.sql      # 所有資料表
     │       └── V2__seed_data.sql        # 車型、車色、選配種子資料
     └── src/test/java/
-        └── architecture/ArchitectureTest.java  # 5 條 ArchUnit 規則
+        └── architecture/ArchitectureTest.java  # 7 條 ArchUnit 規則（含 CQRS）
 ```
 
 ---
@@ -758,7 +845,7 @@ mvn test -pl manufacturing-context/manufacturing-domain
 mvn test -pl bootstrap -Dtest=ArchitectureTest
 ```
 
-### 測試摘要（45 個測試）
+### 測試摘要（47 個測試）
 
 | 測試類別 | 數量 | 驗證內容 |
 |---------|------|---------|
@@ -768,7 +855,7 @@ mvn test -pl bootstrap -Dtest=ArchitectureTest
 | `QualityInspectionTest` | 13 | 安全項目失敗（BR-10）、有條件通過（BR-11）、四眼原則（BR-12） |
 | `BomExpansionServiceTest` | 2 | BOM 展開（含可用／缺少物料情境） |
 | `InspectionCompletionServiceTest` | 2 | 跨聚合檢驗結果傳播 |
-| `ArchitectureTest` | 5 | 領域／應用層零 Spring/JPA 依賴 |
+| `ArchitectureTest` | 7 | 領域／應用層零 Spring/JPA 依賴 + CQRS 規則 |
 
 ---
 
