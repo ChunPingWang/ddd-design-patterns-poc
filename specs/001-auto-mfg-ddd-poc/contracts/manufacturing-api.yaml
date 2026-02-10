@@ -1,0 +1,330 @@
+openapi: 3.1.0
+info:
+  title: AutoMFG Manufacturing Management API
+  version: 1.0.0
+  description: Manufacturing Management Context — production orders and assembly operations
+
+servers:
+  - url: http://localhost:8080
+    description: Local development
+
+paths:
+  /api/v1/production-orders:
+    get:
+      operationId: listProductionOrders
+      summary: List production orders with optional filters
+      tags: [Production Orders]
+      parameters:
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [MATERIAL_PENDING, SCHEDULED, IN_PRODUCTION, ASSEMBLY_COMPLETED, INSPECTION_PASSED, INSPECTION_FAILED, REWORK_IN_PROGRESS]
+      responses:
+        '200':
+          description: List of production orders
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ProductionOrderSummary'
+
+  /api/v1/production-orders/{productionOrderId}:
+    get:
+      operationId: getProductionOrder
+      summary: Get production order details including BOM and assembly progress
+      tags: [Production Orders]
+      parameters:
+        - name: productionOrderId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Production order details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProductionOrderResponse'
+        '404':
+          description: Production order not found
+
+  /api/v1/production-orders/{productionOrderId}/start:
+    post:
+      operationId: startProduction
+      summary: Start production — operator scans at first workstation (UC-03)
+      description: |
+        Transitions production order from SCHEDULED to IN_PRODUCTION.
+        Triggered when operator scans the barcode at the first workstation.
+      tags: [Production Orders]
+      parameters:
+        - name: productionOrderId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/StartProductionRequest'
+      responses:
+        '200':
+          description: Production started
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProductionOrderResponse'
+        '409':
+          description: Cannot start (not in SCHEDULED status)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/v1/production-orders/{productionOrderId}/assembly-steps/{stepId}/complete:
+    post:
+      operationId: completeAssemblyStep
+      summary: Complete an assembly step at current workstation (UC-03)
+      description: |
+        Records batch number (BR-08), validates station sequence (BR-07),
+        auto-advances to next station when all tasks complete (BR-07),
+        raises overtime alert if >150% standard time (BR-09).
+      tags: [Assembly]
+      parameters:
+        - name: productionOrderId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: stepId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CompleteAssemblyStepRequest'
+      responses:
+        '200':
+          description: Step completed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AssemblyStepResultResponse'
+        '400':
+          description: Missing batch number or invalid data
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: Station sequence violation or wrong status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/v1/production-orders/{productionOrderId}/assembly-steps:
+    get:
+      operationId: getAssemblySteps
+      summary: Get assembly steps for a production order (filtered by station)
+      tags: [Assembly]
+      parameters:
+        - name: productionOrderId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: stationCode
+          in: query
+          schema:
+            type: string
+          description: Filter steps by workstation code
+      responses:
+        '200':
+          description: Assembly steps
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/AssemblyStepResponse'
+
+components:
+  schemas:
+    StartProductionRequest:
+      type: object
+      required: [operatorId, workstationCode]
+      properties:
+        operatorId:
+          type: string
+          example: "OP-001"
+        workstationCode:
+          type: string
+          example: "WS-01"
+
+    CompleteAssemblyStepRequest:
+      type: object
+      required: [operatorId, materialBatchId, actualMinutes]
+      properties:
+        operatorId:
+          type: string
+          example: "OP-001"
+        materialBatchId:
+          type: string
+          example: "BAT-2026-0211-001"
+          description: Required for traceability (BR-08)
+        actualMinutes:
+          type: integer
+          minimum: 1
+          example: 35
+
+    ProductionOrderResponse:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        orderNumber:
+          type: string
+          example: "PO-SH-202602-00001"
+        sourceOrderId:
+          type: string
+          format: uuid
+        vin:
+          type: string
+          pattern: "^[A-HJ-NPR-Z0-9]{17}$"
+          example: "1HGCM82633A004352"
+        status:
+          type: string
+          enum: [MATERIAL_PENDING, SCHEDULED, IN_PRODUCTION, ASSEMBLY_COMPLETED, INSPECTION_PASSED, INSPECTION_FAILED, REWORK_IN_PROGRESS]
+        currentStationCode:
+          type: string
+          nullable: true
+        currentStationSequence:
+          type: integer
+          nullable: true
+        bomLineItems:
+          type: array
+          items:
+            $ref: '#/components/schemas/BomLineItemResponse'
+        assemblyProgress:
+          $ref: '#/components/schemas/AssemblyProgressResponse'
+        createdAt:
+          type: string
+          format: date-time
+
+    ProductionOrderSummary:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        orderNumber:
+          type: string
+        vin:
+          type: string
+        status:
+          type: string
+        currentStationCode:
+          type: string
+          nullable: true
+
+    BomLineItemResponse:
+      type: object
+      properties:
+        partNumber:
+          type: string
+        partDescription:
+          type: string
+        quantityRequired:
+          type: integer
+        isAvailable:
+          type: boolean
+
+    AssemblyProgressResponse:
+      type: object
+      properties:
+        totalSteps:
+          type: integer
+        completedSteps:
+          type: integer
+        currentStation:
+          type: string
+          nullable: true
+        status:
+          type: string
+          enum: [NOT_STARTED, IN_PROGRESS, COMPLETED]
+
+    AssemblyStepResponse:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        workStationCode:
+          type: string
+        workStationSequence:
+          type: integer
+        taskDescription:
+          type: string
+        standardTimeMinutes:
+          type: integer
+        status:
+          type: string
+          enum: [PENDING, IN_PROGRESS, COMPLETED]
+        operatorId:
+          type: string
+          nullable: true
+        materialBatchId:
+          type: string
+          nullable: true
+        actualTimeMinutes:
+          type: integer
+          nullable: true
+        completedAt:
+          type: string
+          format: date-time
+          nullable: true
+
+    AssemblyStepResultResponse:
+      type: object
+      properties:
+        stepId:
+          type: string
+          format: uuid
+        overtimeAlert:
+          type: boolean
+          description: True if actual time exceeded 150% of standard time
+        stationCompleted:
+          type: boolean
+          description: True if all steps at current station are now completed
+        assemblyCompleted:
+          type: boolean
+          description: True if this was the last step of the final station
+        productionOrderStatus:
+          type: string
+
+    ErrorResponse:
+      type: object
+      properties:
+        error:
+          type: string
+        message:
+          type: string
+        details:
+          type: array
+          items:
+            type: string
