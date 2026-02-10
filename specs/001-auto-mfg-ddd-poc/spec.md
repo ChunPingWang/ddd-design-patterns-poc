@@ -5,6 +5,16 @@
 **Status**: Draft
 **Input**: PRD for automotive manufacturing DDD PoC covering order-to-delivery flow with 5 core use cases across 4 bounded contexts
 
+## Clarifications
+
+### Session 2026-02-11
+
+- Q: What triggers the SCHEDULED → IN_PRODUCTION transition? → A: Operator-initiated — production starts when an operator scans the production order at the first workstation.
+- Q: What are the event delivery guarantees for cross-context domain events? → A: At-least-once delivery with idempotent consumers — events may be delivered more than once; consumers handle duplicates gracefully.
+- Q: When is the VIN assigned to a vehicle? → A: At production order creation — VIN is assigned when the manufacturing context creates the production order, giving the vehicle a unique identity throughout assembly and quality inspection.
+- Q: Should quality traceability data be immutable once recorded? → A: Yes, immutable (append-only). Assembly batch records and inspection results cannot be modified; corrections are appended as new entries referencing the original. This supports 15-year regulatory retention (IATF 16949).
+- Q: What happens after a rework order is completed? → A: Vehicle returns to full quality inspection. The complete inspection checklist is re-executed (not just failed items).
+
 ## User Scenarios & Testing *(mandatory)*
 
 ### User Story 1 - Dealer Places a Vehicle Order (Priority: P1)
@@ -34,7 +44,7 @@ When an order is placed, the system automatically creates a production order. It
 
 **Acceptance Scenarios**:
 
-1. **Given** an `OrderPlacedEvent` is received for a vehicle with all materials available, **When** the system processes the event, **Then** a production order is created with status `SCHEDULED` and a complete BOM breakdown.
+1. **Given** an `OrderPlacedEvent` is received for a vehicle with all materials available, **When** the system processes the event, **Then** a production order is created with status `SCHEDULED`, a unique VIN is assigned, and a complete BOM breakdown is included.
 2. **Given** an `OrderPlacedEvent` is received but certain materials are insufficient, **When** the system processes the event, **Then** a production order is created with status `MATERIAL_PENDING` and a `MaterialShortageEvent` is published listing the missing materials.
 3. **Given** an `OrderPlacedEvent` is received, **When** the production order is created, **Then** it maintains a 1:1 relationship with the originating customer order.
 
@@ -50,7 +60,8 @@ A production line operator scans a production order barcode at their workstation
 
 **Acceptance Scenarios**:
 
-1. **Given** a production order with status `IN_PRODUCTION` at Station 3, **When** the operator scans the barcode at Station 3, **Then** the system displays the assembly task list for Station 3.
+1. **Given** a production order with status `SCHEDULED`, **When** an operator scans the production order barcode at the first workstation, **Then** the system transitions the production order to `IN_PRODUCTION` and displays the assembly task list for that station.
+2. **Given** a production order with status `IN_PRODUCTION` at Station 3, **When** the operator scans the barcode at Station 3, **Then** the system displays the assembly task list for Station 3.
 2. **Given** an operator is at Station 3 with 4 assembly tasks, **When** the operator completes all 4 tasks recording batch numbers for each, **Then** the system automatically advances the order to Station 4.
 3. **Given** an operator attempts to scan into Station 5 while the order is still at Station 3, **When** the scan is processed, **Then** the system rejects the operation with an error indicating stations must be completed in sequence.
 4. **Given** an operator is at the final workstation and completes all tasks, **When** the last task is recorded, **Then** the production order status changes to `ASSEMBLY_COMPLETED`.
@@ -74,6 +85,7 @@ After assembly is completed, a quality inspector receives the vehicle for inspec
 3. **Given** a vehicle undergoing inspection with 3 non-safety items marked as "conditional pass" and all others passing, **When** the inspector submits the results, **Then** the vehicle passes inspection (maximum 3 conditional passes allowed for non-safety items).
 4. **Given** a vehicle undergoing inspection with 4 non-safety items marked as "conditional pass," **When** the inspector submits the results, **Then** the vehicle fails inspection (exceeds the 3 conditional pass limit).
 5. **Given** an inspection has been completed by one inspector, **When** the results are submitted, **Then** the system requires a different inspector to review and confirm the results before finalizing (four-eyes principle).
+6. **Given** a vehicle that failed inspection and has a completed rework order, **When** rework is marked complete, **Then** the vehicle returns to quality inspection status and the full inspection checklist must be re-executed.
 
 ---
 
@@ -103,6 +115,7 @@ A dealer submits a change request for an existing order — such as changing the
 - How does the system handle a quality inspector attempting to inspect a vehicle that is still in assembly? The system must enforce status prerequisites and reject the inspection attempt.
 - What happens if the four-eyes review inspector disagrees with the original inspection result? The system should flag the discrepancy for resolution before finalizing.
 - What happens when a production order's assembly step fails to record a batch number? The system must not allow the step to be marked complete without traceability data.
+- What happens when a duplicate `OrderPlacedEvent` is delivered? The manufacturing context must detect the duplicate (idempotent consumer) and skip production order creation without error.
 
 ## Requirements *(mandatory)*
 
@@ -124,11 +137,12 @@ A dealer submits a change request for an existing order — such as changing the
 
 **Manufacturing Management Context**:
 
-- **FR-012**: System MUST automatically create a production order upon receiving an `OrderPlacedEvent`.
+- **FR-012**: System MUST automatically create a production order upon receiving an `OrderPlacedEvent`, assigning a unique 17-character VIN to the vehicle at creation time.
 - **FR-013**: System MUST expand the vehicle configuration into a complete BOM for each production order.
 - **FR-014**: System MUST check material availability and set production order status to `SCHEDULED` (sufficient) or `MATERIAL_PENDING` (insufficient).
 - **FR-015**: System MUST publish a `MaterialShortageEvent` when materials are insufficient.
 - **FR-016**: System MUST enforce a 1:1 relationship between customer orders and production orders.
+- **FR-016a**: System MUST transition a production order from `SCHEDULED` to `IN_PRODUCTION` when an operator scans it at the first workstation.
 - **FR-017**: System MUST enforce sequential workstation progression — no station skipping allowed.
 - **FR-018**: System MUST require material batch number recording for every assembly step.
 - **FR-019**: System MUST automatically advance the production order to the next station when all tasks at the current station are completed.
@@ -143,23 +157,27 @@ A dealer submits a change request for an existing order — such as changing the
 - **FR-025**: System MUST require a different inspector to review and confirm inspection results (four-eyes principle).
 - **FR-026**: System MUST publish a `VehicleCompletedEvent` when a vehicle passes inspection.
 - **FR-027**: System MUST create a rework order when a vehicle fails inspection.
+- **FR-027a**: Upon rework completion, the vehicle MUST return to quality inspection and undergo the full inspection checklist again (not just previously failed items).
+- **FR-027b**: Assembly step records (operator, timestamp, batch numbers) and inspection results MUST be immutable once recorded. Corrections MUST be appended as new entries referencing the original record.
+- **FR-027c**: Quality traceability data (assembly records, inspection results) MUST be retained for a minimum of 15 years to comply with IATF 16949 requirements.
 
 **Cross-Context Communication**:
 
-- **FR-028**: System MUST use domain events for communication between bounded contexts (Order, Manufacturing, Material, Logistics).
+- **FR-028**: System MUST use domain events for communication between bounded contexts (Order, Manufacturing, Material, Logistics) with at-least-once delivery guarantees.
+- **FR-028a**: Event consumers MUST be idempotent — processing the same event more than once must not produce duplicate side effects (e.g., a duplicate `OrderPlacedEvent` must not create a second production order).
 - **FR-029**: System MUST translate order context vocabulary to manufacturing context vocabulary through an anti-corruption layer when referencing vehicle configurations.
 
 ### Key Entities
 
 - **Order**: A dealer's request to purchase a specific vehicle configuration. Key attributes: order ID, dealer, vehicle model, color, option packages, status (PLACED, SCHEDULED, IN_PRODUCTION, COMPLETED, CANCELLED), estimated delivery date, price quote, change count.
 - **Vehicle Configuration**: A specification defining a vehicle model's available colors, option packages, and compatibility rules between options. Referenced by orders through an anti-corruption layer.
-- **Production Order**: A manufacturing instruction to build a specific vehicle. Key attributes: production order ID, linked order ID, BOM, status (SCHEDULED, MATERIAL_PENDING, IN_PRODUCTION, ASSEMBLY_COMPLETED, INSPECTION_PASSED, INSPECTION_FAILED), current workstation.
+- **Production Order**: A manufacturing instruction to build a specific vehicle. Key attributes: production order ID, linked order ID, VIN (assigned at creation), BOM, status (SCHEDULED, MATERIAL_PENDING, IN_PRODUCTION, ASSEMBLY_COMPLETED, INSPECTION_PASSED, INSPECTION_FAILED), current workstation.
 - **BOM (Bill of Materials)**: The complete list of parts and materials required to assemble a specific vehicle configuration. Expanded from vehicle configuration during production order creation.
 - **Workstation**: A defined position on the assembly line where specific assembly tasks are performed in sequence.
-- **Assembly Step**: A single task performed at a workstation, recording the operator, timestamp, and material batch numbers used.
-- **Quality Inspection**: An evaluation of a completed vehicle against a model-specific checklist. Includes individual item results (pass/fail/conditional) and requires dual-inspector review.
+- **Assembly Step**: A single task performed at a workstation, recording the operator, timestamp, and material batch numbers used. Records are immutable once created; corrections are appended as new entries referencing the original.
+- **Quality Inspection**: An evaluation of a completed vehicle against a model-specific checklist. Includes individual item results (pass/fail/conditional) and requires dual-inspector review. Results are immutable; corrections are appended referencing the original.
 - **Inspection Checklist**: A model-specific list of inspection items, each categorized as safety-critical or non-safety.
-- **Rework Order**: A repair instruction created when a vehicle fails quality inspection, referencing the failed inspection items.
+- **Rework Order**: A repair instruction created when a vehicle fails quality inspection, referencing the failed inspection items. Upon completion, the vehicle returns to quality inspection for a full re-inspection cycle.
 - **Dealer**: An authorized vehicle sales partner who places and manages orders.
 
 ## Success Criteria *(mandatory)*

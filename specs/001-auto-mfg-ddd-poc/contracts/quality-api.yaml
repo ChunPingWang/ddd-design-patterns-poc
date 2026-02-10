@@ -1,0 +1,320 @@
+openapi: 3.1.0
+info:
+  title: AutoMFG Quality Inspection API
+  version: 1.0.0
+  description: Quality Inspection operations within the Manufacturing Management Context
+
+servers:
+  - url: http://localhost:8080
+    description: Local development
+
+paths:
+  /api/v1/inspections:
+    post:
+      operationId: createInspection
+      summary: Create a quality inspection for an assembled vehicle (UC-04)
+      description: |
+        Creates a new inspection with the model-specific checklist (FR-022).
+        Only allowed when production order is ASSEMBLY_COMPLETED.
+      tags: [Quality Inspection]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateInspectionRequest'
+      responses:
+        '201':
+          description: Inspection created with checklist loaded
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InspectionResponse'
+        '409':
+          description: Vehicle not in ASSEMBLY_COMPLETED status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/v1/inspections/{inspectionId}:
+    get:
+      operationId: getInspection
+      summary: Get inspection details with item results
+      tags: [Quality Inspection]
+      parameters:
+        - name: inspectionId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Inspection details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InspectionResponse'
+        '404':
+          description: Inspection not found
+
+  /api/v1/inspections/{inspectionId}/items/{itemId}/result:
+    post:
+      operationId: recordItemResult
+      summary: Record result for a single inspection item
+      tags: [Quality Inspection]
+      parameters:
+        - name: inspectionId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: itemId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RecordItemResultRequest'
+      responses:
+        '200':
+          description: Item result recorded
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InspectionItemResponse'
+
+  /api/v1/inspections/{inspectionId}/complete:
+    post:
+      operationId: completeInspection
+      summary: Complete inspection and evaluate overall result (UC-04)
+      description: |
+        Evaluates all items: safety failure = vehicle fails (BR-10),
+        max 3 conditional non-safety items (BR-11).
+      tags: [Quality Inspection]
+      parameters:
+        - name: inspectionId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CompleteInspectionRequest'
+      responses:
+        '200':
+          description: Inspection completed, result evaluated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InspectionResponse'
+        '400':
+          description: Not all items inspected
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/v1/inspections/{inspectionId}/review:
+    post:
+      operationId: reviewInspection
+      summary: Four-eyes review of inspection results (BR-12)
+      description: |
+        A different inspector reviews and confirms the results.
+        Reviewer must differ from original inspector (four-eyes principle).
+        On pass → publishes VehicleCompletedEvent.
+        On fail → creates ReworkOrder.
+      tags: [Quality Inspection]
+      parameters:
+        - name: inspectionId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReviewInspectionRequest'
+      responses:
+        '200':
+          description: Inspection reviewed and finalized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InspectionResponse'
+        '400':
+          description: Same inspector as original (four-eyes violation)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: Inspection not yet completed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/v1/rework-orders/{reworkOrderId}/complete:
+    post:
+      operationId: completeRework
+      summary: Mark rework as completed — vehicle returns to inspection (FR-027a)
+      tags: [Rework]
+      parameters:
+        - name: reworkOrderId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Rework completed, vehicle returned to inspection queue
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReworkOrderResponse'
+
+components:
+  schemas:
+    CreateInspectionRequest:
+      type: object
+      required: [productionOrderId, inspectorId]
+      properties:
+        productionOrderId:
+          type: string
+          format: uuid
+        inspectorId:
+          type: string
+          example: "QC-001"
+
+    CompleteInspectionRequest:
+      type: object
+      required: [inspectorId]
+      properties:
+        inspectorId:
+          type: string
+          example: "QC-001"
+
+    ReviewInspectionRequest:
+      type: object
+      required: [reviewerId]
+      properties:
+        reviewerId:
+          type: string
+          example: "QC-002"
+          description: Must differ from the original inspector
+
+    RecordItemResultRequest:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [PASSED, FAILED, CONDITIONAL]
+        notes:
+          type: string
+          nullable: true
+
+    InspectionResponse:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        productionOrderId:
+          type: string
+          format: uuid
+        vin:
+          type: string
+        result:
+          type: string
+          enum: [PASSED, CONDITIONAL_PASS, FAILED]
+          nullable: true
+        inspectorId:
+          type: string
+        reviewerId:
+          type: string
+          nullable: true
+        inspectedAt:
+          type: string
+          format: date-time
+          nullable: true
+        reviewedAt:
+          type: string
+          format: date-time
+          nullable: true
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/InspectionItemResponse'
+
+    InspectionItemResponse:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        description:
+          type: string
+        isSafetyRelated:
+          type: boolean
+        status:
+          type: string
+          enum: [PENDING, PASSED, FAILED, CONDITIONAL]
+        notes:
+          type: string
+          nullable: true
+
+    ReworkOrderResponse:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        productionOrderId:
+          type: string
+          format: uuid
+        inspectionId:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum: [CREATED, IN_PROGRESS, COMPLETED]
+        failedItemDescriptions:
+          type: array
+          items:
+            type: string
+        createdAt:
+          type: string
+          format: date-time
+        completedAt:
+          type: string
+          format: date-time
+          nullable: true
+
+    ErrorResponse:
+      type: object
+      properties:
+        error:
+          type: string
+        message:
+          type: string
+        details:
+          type: array
+          items:
+            type: string
