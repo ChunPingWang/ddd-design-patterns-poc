@@ -2,7 +2,9 @@ package com.automfg.manufacturing.application.usecase;
 
 import java.util.UUID;
 
-public interface CompleteAssemblyStepUseCase {
+import com.automfg.shared.application.CommandUseCase;
+
+public interface CompleteAssemblyStepUseCase extends CommandUseCase {
 
     record CompleteAssemblyStepCommand(
         UUID productionOrderId,

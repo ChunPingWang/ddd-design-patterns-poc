@@ -1,10 +1,9 @@
 package com.automfg.order.infrastructure.adapter.inbound;
 
 import com.automfg.order.application.usecase.ChangeOrderUseCase;
+import com.automfg.order.application.usecase.GetOrderUseCase;
+import com.automfg.order.application.usecase.ListOrdersUseCase;
 import com.automfg.order.application.usecase.PlaceOrderUseCase;
-import com.automfg.order.domain.model.Order;
-import com.automfg.order.domain.model.OrderId;
-import com.automfg.order.domain.port.OrderRepository;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -17,7 +16,6 @@ import org.springframework.web.bind.annotation.RestController;
 
 import java.math.BigDecimal;
 import java.time.LocalDate;
-import java.time.LocalDateTime;
 import java.util.List;
 import java.util.UUID;
 
@@ -25,16 +23,22 @@ import java.util.UUID;
 @RequestMapping("/api/v1/orders")
 public class OrderController {
 
+    // Command use cases
     private final PlaceOrderUseCase placeOrderUseCase;
     private final ChangeOrderUseCase changeOrderUseCase;
-    private final OrderRepository orderRepository;
+
+    // Query use cases (CQRS read path)
+    private final GetOrderUseCase getOrderUseCase;
+    private final ListOrdersUseCase listOrdersUseCase;
 
     public OrderController(PlaceOrderUseCase placeOrderUseCase,
                            ChangeOrderUseCase changeOrderUseCase,
-                           OrderRepository orderRepository) {
+                           GetOrderUseCase getOrderUseCase,
+                           ListOrdersUseCase listOrdersUseCase) {
         this.placeOrderUseCase = placeOrderUseCase;
         this.changeOrderUseCase = changeOrderUseCase;
-        this.orderRepository = orderRepository;
+        this.getOrderUseCase = getOrderUseCase;
+        this.listOrdersUseCase = listOrdersUseCase;
     }
 
     // --- Request/Response DTOs ---
@@ -52,16 +56,9 @@ public class OrderController {
                                        List<String> optionPackageCodes, BigDecimal priceQuote,
                                        int changeCount, UUID newOrderId) {}
 
-    public record OrderResponse(UUID id, String orderNumber, String dealerId,
-                                 String vehicleModelCode, String colorCode,
-                                 List<String> optionPackageCodes, String status,
-                                 LocalDate estimatedDeliveryDate, BigDecimal priceQuote,
-                                 int changeCount, LocalDateTime orderDate,
-                                 LocalDateTime createdAt, LocalDateTime updatedAt) {}
-
     public record ErrorResponse(String message) {}
 
-    // --- Endpoints ---
+    // --- Command Endpoints ---
 
     @PostMapping
     public ResponseEntity<?> placeOrder(@RequestBody PlaceOrderRequest request) {
@@ -88,35 +85,6 @@ public class OrderController {
         } catch (IllegalStateException e) {
             return ResponseEntity.status(HttpStatus.CONFLICT).body(new ErrorResponse(e.getMessage()));
         }
-    }
-
-    @GetMapping
-    public ResponseEntity<List<OrderResponse>> listOrders(
-            @RequestParam(required = false) String dealerId,
-            @RequestParam(required = false) String status) {
-        List<Order> orders;
-        if (dealerId != null && status != null) {
-            orders = orderRepository.findByDealerIdAndStatus(dealerId, status);
-        } else {
-            // Fallback: if no filters, we could return empty or all.
-            // For safety, return empty when no filters provided.
-            orders = dealerId != null
-                    ? orderRepository.findByDealerIdAndStatus(dealerId, "PLACED")
-                    : List.of();
-        }
-
-        List<OrderResponse> responses = orders.stream()
-                .map(this::toOrderResponse)
-                .toList();
-
-        return ResponseEntity.ok(responses);
-    }
-
-    @GetMapping("/{orderId}")
-    public ResponseEntity<?> getOrder(@PathVariable UUID orderId) {
-        return orderRepository.findById(new OrderId(orderId))
-                .map(order -> ResponseEntity.ok(toOrderResponse(order)))
-                .orElse(ResponseEntity.notFound().build());
     }
 
     @PostMapping("/{orderId}/changes")
@@ -150,21 +118,25 @@ public class OrderController {
         }
     }
 
-    private OrderResponse toOrderResponse(Order order) {
-        return new OrderResponse(
-                order.getId().value(),
-                order.getOrderNumber().value(),
-                order.getDealerId(),
-                order.getVehicleModelCode(),
-                order.getColorCode(),
-                order.getOptionPackageCodes(),
-                order.getStatus().name(),
-                order.getEstimatedDeliveryDate(),
-                order.getPriceQuote(),
-                order.getChangeCount(),
-                order.getOrderDate(),
-                order.getCreatedAt(),
-                order.getUpdatedAt()
-        );
+    // --- Query Endpoints (CQRS read path) ---
+
+    @GetMapping
+    public ResponseEntity<List<ListOrdersUseCase.OrderSummary>> listOrders(
+            @RequestParam(required = false) String dealerId,
+            @RequestParam(required = false) String status) {
+        List<ListOrdersUseCase.OrderSummary> result = listOrdersUseCase.execute(
+                new ListOrdersUseCase.ListOrdersQuery(dealerId, status));
+        return ResponseEntity.ok(result);
+    }
+
+    @GetMapping("/{orderId}")
+    public ResponseEntity<?> getOrder(@PathVariable UUID orderId) {
+        try {
+            GetOrderUseCase.OrderDetail result = getOrderUseCase.execute(
+                    new GetOrderUseCase.GetOrderQuery(orderId));
+            return ResponseEntity.ok(result);
+        } catch (IllegalArgumentException e) {
+            return ResponseEntity.notFound().build();
+        }
     }
 }

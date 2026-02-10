@@ -1,11 +1,10 @@
 package com.automfg.manufacturing.infrastructure.adapter.inbound;
 
 import com.automfg.manufacturing.application.usecase.CompleteAssemblyStepUseCase;
+import com.automfg.manufacturing.application.usecase.GetAssemblyStepsUseCase;
+import com.automfg.manufacturing.application.usecase.GetProductionOrderUseCase;
+import com.automfg.manufacturing.application.usecase.ListProductionOrdersUseCase;
 import com.automfg.manufacturing.application.usecase.StartProductionUseCase;
-import com.automfg.manufacturing.infrastructure.persistence.AssemblyProcessJpaEntity;
-import com.automfg.manufacturing.infrastructure.persistence.AssemblyStepJpaEntity;
-import com.automfg.manufacturing.infrastructure.persistence.ProductionOrderJpaEntity;
-import com.automfg.manufacturing.infrastructure.persistence.ProductionOrderJpaRepository;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -15,7 +14,6 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
-import java.time.LocalDateTime;
 import java.util.List;
 import java.util.UUID;
 
@@ -23,108 +21,39 @@ import java.util.UUID;
 @RequestMapping("/api/v1/production-orders")
 public class ProductionOrderController {
 
-    private final ProductionOrderJpaRepository jpaRepository;
+    // Command use cases
     private final StartProductionUseCase startProductionUseCase;
     private final CompleteAssemblyStepUseCase completeAssemblyStepUseCase;
 
-    public ProductionOrderController(ProductionOrderJpaRepository jpaRepository,
-                                     StartProductionUseCase startProductionUseCase,
-                                     CompleteAssemblyStepUseCase completeAssemblyStepUseCase) {
-        this.jpaRepository = jpaRepository;
+    // Query use cases (CQRS read path)
+    private final GetProductionOrderUseCase getProductionOrderUseCase;
+    private final ListProductionOrdersUseCase listProductionOrdersUseCase;
+    private final GetAssemblyStepsUseCase getAssemblyStepsUseCase;
+
+    public ProductionOrderController(StartProductionUseCase startProductionUseCase,
+                                     CompleteAssemblyStepUseCase completeAssemblyStepUseCase,
+                                     GetProductionOrderUseCase getProductionOrderUseCase,
+                                     ListProductionOrdersUseCase listProductionOrdersUseCase,
+                                     GetAssemblyStepsUseCase getAssemblyStepsUseCase) {
         this.startProductionUseCase = startProductionUseCase;
         this.completeAssemblyStepUseCase = completeAssemblyStepUseCase;
+        this.getProductionOrderUseCase = getProductionOrderUseCase;
+        this.listProductionOrdersUseCase = listProductionOrdersUseCase;
+        this.getAssemblyStepsUseCase = getAssemblyStepsUseCase;
     }
 
-    // --- DTOs ---
-
-    record ProductionOrderSummaryDto(
-        UUID id,
-        String orderNumber,
-        String vin,
-        String status,
-        Integer currentStationSequence,
-        LocalDateTime createdAt
-    ) {}
-
-    record ProductionOrderDetailDto(
-        UUID id,
-        String orderNumber,
-        UUID sourceOrderId,
-        String vin,
-        String status,
-        Integer currentStationSequence,
-        LocalDateTime scheduledStartDate,
-        LocalDateTime createdAt,
-        String assemblyProcessStatus,
-        int totalAssemblySteps
-    ) {}
+    // --- Command DTOs ---
 
     record StartProductionRequest(String operatorId, String workstationCode) {}
-
     record StartProductionResponse(UUID productionOrderId, String status) {}
 
     record CompleteAssemblyStepRequest(String operatorId, String materialBatchId, int actualMinutes) {}
-
     record CompleteAssemblyStepResponse(
-        UUID productionOrderId,
-        UUID assemblyStepId,
-        String orderStatus,
-        boolean overtimeAlert,
-        boolean stationCompleted,
-        boolean assemblyCompleted
+        UUID productionOrderId, UUID assemblyStepId, String orderStatus,
+        boolean overtimeAlert, boolean stationCompleted, boolean assemblyCompleted
     ) {}
 
-    record AssemblyStepDto(
-        UUID id,
-        String workStationCode,
-        int workStationSequence,
-        String taskDescription,
-        int standardTimeMinutes,
-        String status,
-        String operatorId,
-        String materialBatchId,
-        Integer actualTimeMinutes,
-        LocalDateTime completedAt
-    ) {}
-
-    // --- Endpoints ---
-
-    @GetMapping
-    public ResponseEntity<List<ProductionOrderSummaryDto>> listProductionOrders(
-            @RequestParam(required = false) String status) {
-        List<ProductionOrderJpaEntity> entities;
-        if (status != null && !status.isBlank()) {
-            entities = jpaRepository.findByStatus(status);
-        } else {
-            entities = jpaRepository.findAll();
-        }
-
-        List<ProductionOrderSummaryDto> result = entities.stream()
-            .map(e -> new ProductionOrderSummaryDto(
-                e.getId(), e.getOrderNumber(), e.getVin(),
-                e.getStatus(), e.getCurrentStationSequence(), e.getCreatedAt()))
-            .toList();
-
-        return ResponseEntity.ok(result);
-    }
-
-    @GetMapping("/{id}")
-    public ResponseEntity<ProductionOrderDetailDto> getProductionOrder(@PathVariable UUID id) {
-        return jpaRepository.findById(id)
-            .map(e -> {
-                AssemblyProcessJpaEntity ap = e.getAssemblyProcess();
-                String apStatus = ap != null ? ap.getStatus() : null;
-                int totalSteps = ap != null ? ap.getSteps().size() : 0;
-
-                return new ProductionOrderDetailDto(
-                    e.getId(), e.getOrderNumber(), e.getSourceOrderId(),
-                    e.getVin(), e.getStatus(), e.getCurrentStationSequence(),
-                    e.getScheduledStartDate(), e.getCreatedAt(),
-                    apStatus, totalSteps);
-            })
-            .map(ResponseEntity::ok)
-            .orElse(ResponseEntity.notFound().build());
-    }
+    // --- Command Endpoints ---
 
     @PostMapping("/{id}/start")
     public ResponseEntity<StartProductionResponse> startProduction(
@@ -155,34 +84,36 @@ public class ProductionOrderController {
             result.stationCompleted(), result.assemblyCompleted()));
     }
 
+    // --- Query Endpoints (CQRS read path) ---
+
+    @GetMapping
+    public ResponseEntity<List<ListProductionOrdersUseCase.ProductionOrderSummary>> listProductionOrders(
+            @RequestParam(required = false) String status) {
+        List<ListProductionOrdersUseCase.ProductionOrderSummary> result =
+            listProductionOrdersUseCase.execute(
+                new ListProductionOrdersUseCase.ListProductionOrdersQuery(status));
+        return ResponseEntity.ok(result);
+    }
+
+    @GetMapping("/{id}")
+    public ResponseEntity<?> getProductionOrder(@PathVariable UUID id) {
+        try {
+            GetProductionOrderUseCase.ProductionOrderDetail result =
+                getProductionOrderUseCase.execute(
+                    new GetProductionOrderUseCase.GetProductionOrderQuery(id));
+            return ResponseEntity.ok(result);
+        } catch (IllegalArgumentException e) {
+            return ResponseEntity.notFound().build();
+        }
+    }
+
     @GetMapping("/{id}/assembly-steps")
-    public ResponseEntity<List<AssemblyStepDto>> getAssemblySteps(
+    public ResponseEntity<List<GetAssemblyStepsUseCase.AssemblyStepDetail>> getAssemblySteps(
             @PathVariable UUID id,
             @RequestParam(required = false) String stationCode) {
-        return jpaRepository.findById(id)
-            .map(e -> {
-                AssemblyProcessJpaEntity ap = e.getAssemblyProcess();
-                if (ap == null) {
-                    return ResponseEntity.ok(List.<AssemblyStepDto>of());
-                }
-
-                List<AssemblyStepJpaEntity> steps = ap.getSteps();
-                if (stationCode != null && !stationCode.isBlank()) {
-                    steps = steps.stream()
-                        .filter(s -> s.getWorkStationCode().equals(stationCode))
-                        .toList();
-                }
-
-                List<AssemblyStepDto> dtos = steps.stream()
-                    .map(s -> new AssemblyStepDto(
-                        s.getId(), s.getWorkStationCode(), s.getWorkStationSequence(),
-                        s.getTaskDescription(), s.getStandardTimeMinutes(),
-                        s.getStatus(), s.getOperatorId(), s.getMaterialBatchId(),
-                        s.getActualTimeMinutes(), s.getCompletedAt()))
-                    .toList();
-
-                return ResponseEntity.ok(dtos);
-            })
-            .orElse(ResponseEntity.notFound().build());
+        List<GetAssemblyStepsUseCase.AssemblyStepDetail> result =
+            getAssemblyStepsUseCase.execute(
+                new GetAssemblyStepsUseCase.GetAssemblyStepsQuery(id, stationCode));
+        return ResponseEntity.ok(result);
     }
 }

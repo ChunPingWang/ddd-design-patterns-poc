@@ -1,9 +1,6 @@
 package com.automfg.manufacturing.infrastructure.adapter.inbound;
 
 import com.automfg.manufacturing.application.usecase.*;
-import com.automfg.manufacturing.domain.model.QualityInspection;
-import com.automfg.manufacturing.domain.model.QualityInspectionId;
-import com.automfg.manufacturing.domain.port.QualityInspectionRepository;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
@@ -14,23 +11,28 @@ import java.util.UUID;
 @RequestMapping("/api/v1/inspections")
 public class InspectionController {
 
+    // Command use cases
     private final CreateInspectionUseCase createInspectionUseCase;
     private final RecordInspectionItemResultUseCase recordInspectionItemResultUseCase;
     private final CompleteInspectionUseCase completeInspectionUseCase;
     private final ReviewInspectionUseCase reviewInspectionUseCase;
-    private final QualityInspectionRepository qualityInspectionRepository;
+
+    // Query use cases (CQRS read path)
+    private final GetInspectionUseCase getInspectionUseCase;
 
     public InspectionController(CreateInspectionUseCase createInspectionUseCase,
                                  RecordInspectionItemResultUseCase recordInspectionItemResultUseCase,
                                  CompleteInspectionUseCase completeInspectionUseCase,
                                  ReviewInspectionUseCase reviewInspectionUseCase,
-                                 QualityInspectionRepository qualityInspectionRepository) {
+                                 GetInspectionUseCase getInspectionUseCase) {
         this.createInspectionUseCase = createInspectionUseCase;
         this.recordInspectionItemResultUseCase = recordInspectionItemResultUseCase;
         this.completeInspectionUseCase = completeInspectionUseCase;
         this.reviewInspectionUseCase = reviewInspectionUseCase;
-        this.qualityInspectionRepository = qualityInspectionRepository;
+        this.getInspectionUseCase = getInspectionUseCase;
     }
+
+    // --- Command Endpoints ---
 
     @PostMapping
     public ResponseEntity<CreateInspectionResponse> createInspection(
@@ -40,14 +42,6 @@ public class InspectionController {
         var result = createInspectionUseCase.execute(command);
         return ResponseEntity.status(HttpStatus.CREATED)
             .body(new CreateInspectionResponse(result.inspectionId(), result.itemCount()));
-    }
-
-    @GetMapping("/{inspectionId}")
-    public ResponseEntity<InspectionDetailResponse> getInspection(
-            @PathVariable UUID inspectionId) {
-        return qualityInspectionRepository.findById(new QualityInspectionId(inspectionId))
-            .map(inspection -> ResponseEntity.ok(toDetailResponse(inspection)))
-            .orElse(ResponseEntity.notFound().build());
     }
 
     @PostMapping("/{inspectionId}/items/{itemId}/result")
@@ -82,6 +76,19 @@ public class InspectionController {
             result.inspectionId(), result.result(), result.reviewerId()));
     }
 
+    // --- Query Endpoints (CQRS read path) ---
+
+    @GetMapping("/{inspectionId}")
+    public ResponseEntity<?> getInspection(@PathVariable UUID inspectionId) {
+        try {
+            GetInspectionUseCase.InspectionDetail result = getInspectionUseCase.execute(
+                new GetInspectionUseCase.GetInspectionQuery(inspectionId));
+            return ResponseEntity.ok(result);
+        } catch (IllegalArgumentException e) {
+            return ResponseEntity.notFound().build();
+        }
+    }
+
     // --- Request/Response DTOs ---
 
     record CreateInspectionRequest(UUID productionOrderId, String vehicleModelCode, String inspectorId) {}
@@ -94,26 +101,4 @@ public class InspectionController {
 
     record ReviewInspectionRequest(String reviewerId) {}
     record ReviewInspectionResponse(UUID inspectionId, String result, String reviewerId) {}
-
-    record InspectionDetailResponse(
-        UUID id,
-        UUID productionOrderId,
-        String vin,
-        String result,
-        String inspectorId,
-        String reviewerId,
-        int itemCount
-    ) {}
-
-    private InspectionDetailResponse toDetailResponse(QualityInspection inspection) {
-        return new InspectionDetailResponse(
-            inspection.getId().value(),
-            inspection.getProductionOrderId().value(),
-            inspection.getVin().value(),
-            inspection.getResult() != null ? inspection.getResult().name() : null,
-            inspection.getInspectorId(),
-            inspection.getReviewerId(),
-            inspection.getItems().size()
-        );
-    }
 }

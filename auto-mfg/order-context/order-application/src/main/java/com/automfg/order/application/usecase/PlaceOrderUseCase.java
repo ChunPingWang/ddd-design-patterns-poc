@@ -5,7 +5,9 @@ import java.time.LocalDate;
 import java.util.List;
 import java.util.UUID;
 
-public interface PlaceOrderUseCase {
+import com.automfg.shared.application.CommandUseCase;
+
+public interface PlaceOrderUseCase extends CommandUseCase {
 
     record PlaceOrderCommand(String dealerId, String vehicleModelCode, String colorCode,
                              List<String> optionPackageCodes) {}

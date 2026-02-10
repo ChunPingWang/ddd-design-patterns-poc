@@ -5,7 +5,9 @@ import java.time.LocalDate;
 import java.util.List;
 import java.util.UUID;
 
-public interface ChangeOrderUseCase {
+import com.automfg.shared.application.CommandUseCase;
+
+public interface ChangeOrderUseCase extends CommandUseCase {
 
     record ChangeOrderCommand(UUID orderId, String newColorCode,
                                List<String> newOptionPackageCodes,

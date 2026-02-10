@@ -3,7 +3,9 @@ package com.automfg.manufacturing.application.usecase;
 import java.util.List;
 import java.util.UUID;
 
-public interface CreateProductionOrderUseCase {
+import com.automfg.shared.application.CommandUseCase;
+
+public interface CreateProductionOrderUseCase extends CommandUseCase {
 
     record CreateProductionOrderCommand(
         UUID sourceOrderId,

@@ -2,7 +2,9 @@ package com.automfg.manufacturing.application.usecase;
 
 import java.util.UUID;
 
-public interface StartProductionUseCase {
+import com.automfg.shared.application.CommandUseCase;
+
+public interface StartProductionUseCase extends CommandUseCase {
 
     record StartProductionCommand(UUID productionOrderId, String operatorId, String workstationCode) {}
 
